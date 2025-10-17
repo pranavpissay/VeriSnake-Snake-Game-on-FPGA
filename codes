@@ -1,0 +1,522 @@
+#snake_main.v
+module snake_main(
+    input clk,
+    input btnU, btnD, btnL, btnR,
+    output [3:0] red,
+    output [3:0] green,
+    output [3:0] blue,
+    output hsync,
+    output vsync
+);
+
+
+    // Clocks and VGA sync
+
+    wire clk25;
+    wire slow_clk;
+    wire [9:0] hcount, vcount;
+    wire video_on;
+
+    clk_divider_snake #(2500000) slow_tick_gen(.clk(clk), .clk_out(slow_clk)); // ~20Hz
+    clk_divider_snake clk25_gen(.clk(clk), .clk_out(clk25));
+
+    vga_sync_snake vga_inst(
+        .clk(clk25),
+        .hcount(hcount),
+        .vcount(vcount),
+        .hsync(hsync),
+        .vsync(vsync),
+        .video_on(video_on)
+    );
+
+
+    // Snake, food, obstacles
+
+    reg [9:0] snake_x[0:99];
+    reg [9:0] snake_y[0:99];
+    reg [6:0] snake_length;
+    integer i;
+
+    reg [1:0] direction; // 00 = Right, 01 = Left, 10 = Up, 11 = Down
+
+    reg [9:0] food_x, food_y;
+    reg [9:0] obs_x[0:4], obs_y[0:4];
+
+    reg game_over;
+
+    // Special food
+    reg [9:0] special_food_x, special_food_y;
+    reg special_food_active;
+    reg [7:0] special_timer;
+
+
+    // Initial state
+ 
+    initial begin
+        snake_x[0] = 320;
+        snake_y[0] = 240;
+        for (i = 1; i < 100; i = i + 1) begin
+            snake_x[i] = 0;
+            snake_y[i] = 0;
+        end
+        snake_length = 1;
+        direction = 2'b00; // right
+
+        food_x = 100;
+        food_y = 100;
+
+        obs_x[0] = (37 * 15) % 630;  obs_y[0] = (29 * 21) % 470;
+        obs_x[1] = (53 * 11) % 630;  obs_y[1] = (61 * 17) % 470;
+        obs_x[2] = (73 * 13) % 630;  obs_y[2] = (41 * 19) % 470;
+        obs_x[3] = (29 * 23) % 630;  obs_y[3] = (59 * 27) % 470;
+        obs_x[4] = (19 * 31) % 630;  obs_y[4] = (83 * 25) % 470;
+
+        game_over = 0;
+
+        special_food_x = 200;
+        special_food_y = 200;
+        special_food_active = 0;
+        special_timer = 0;
+    end
+
+   
+    // Direction control
+
+    always @(posedge clk) begin
+        if (!game_over) begin
+            if (btnU && direction != 2'b11) direction <= 2'b10;
+            else if (btnD && direction != 2'b10) direction <= 2'b11;
+            else if (btnL && direction != 2'b00) direction <= 2'b01;
+            else if (btnR && direction != 2'b01) direction <= 2'b00;
+        end
+    end
+
+
+    // Snake movement & collisions
+ 
+    always @(posedge slow_clk) begin
+        if (!game_over) begin
+            // Move body
+            for (i = 99; i > 0; i = i - 1) begin
+                if (i < snake_length) begin
+                    snake_x[i] <= snake_x[i-1];
+                    snake_y[i] <= snake_y[i-1];
+                end
+            end
+
+            // Move head
+            case(direction)
+                2'b00: snake_x[0] <= (snake_x[0] + 10 > 639) ? 0 : snake_x[0] + 10;
+                2'b01: snake_x[0] <= (snake_x[0] < 10) ? 639 : snake_x[0] - 10;
+                2'b10: snake_y[0] <= (snake_y[0] < 10) ? 479 : snake_y[0] - 10;
+                2'b11: snake_y[0] <= (snake_y[0] + 10 > 479) ? 0 : snake_y[0] + 10;
+            endcase
+
+            // Normal food collision
+            if (snake_x[0] + 10 > food_x && snake_x[0] < food_x + 10 &&
+                snake_y[0] + 10 > food_y && snake_y[0] < food_y + 10) begin
+                snake_length <= snake_length + 1;
+                food_x <= (food_x + 73) % 630;
+                food_y <= (food_y + 51) % 470;
+
+                // Trigger special food every 5th growth
+                if (!special_food_active && (snake_length % 5 == 0)) begin
+                    special_food_x <= (food_x + 123) % 630;
+                    special_food_y <= (food_y + 77) % 470;
+                    special_food_active <= 1;
+                    special_timer <= 100;  // ~100 ticks lifetime
+                end
+            end
+
+            // Special food collision
+            if (special_food_active &&
+                snake_x[0] + 10 > special_food_x && snake_x[0] < special_food_x + 10 &&
+                snake_y[0] + 10 > special_food_y && snake_y[0] < special_food_y + 10) begin
+                snake_length <= snake_length + 3;
+                special_food_active <= 0;
+            end
+
+            // Special food timer
+            if (special_food_active) begin
+                if (special_timer == 0)
+                    special_food_active <= 0;
+                else
+                    special_timer <= special_timer - 1;
+            end
+
+            // Self collision
+            for (i = 1; i < snake_length; i = i + 1) begin
+                if (snake_x[0] == snake_x[i] && snake_y[0] == snake_y[i]) begin
+                    game_over <= 1;
+                end
+            end
+
+            // Obstacle collision
+            for (i = 0; i < 5; i = i + 1) begin
+                if (snake_x[0] + 10 > obs_x[i] && snake_x[0] < obs_x[i] + 10 &&
+                    snake_y[0] + 10 > obs_y[i] && snake_y[0] < obs_y[i] + 10) begin
+                    game_over <= 1;
+                end
+            end
+        end
+    end
+
+
+    // Rendering
+
+    reg [1:0] snake_on;  // 0=off,1=body,2=head
+    reg food_on;
+    reg special_on;
+    reg obs_on;
+    reg score_on;
+    reg gameover_on;
+    integer dx, dy;
+
+    // Score
+    wire [6:0] score = snake_length - 1;
+    wire [3:0] digit1 = score % 10;
+    wire [3:0] digit10 = (score / 10) % 10;
+
+    always @(*) begin
+        snake_on = 0;
+        food_on = 0;
+        special_on = 0;
+        obs_on = 0;
+        score_on = 0;
+        gameover_on = 0;
+
+        // Snake
+        for (i = 0; i < 100; i = i + 1) begin
+            if (i < snake_length) begin
+                if (hcount >= snake_x[i] && hcount < snake_x[i] + 10 &&
+                    vcount >= snake_y[i] && vcount < snake_y[i] + 10) begin
+                    if (i == 0) snake_on = 2;  // head
+                    else snake_on = 1;        // body
+                end
+            end
+        end
+
+        // Normal food (blue circle)
+        dx = hcount - (food_x + 5);
+        dy = vcount - (food_y + 5);
+        if ((dx * dx + dy * dy) <= 25) food_on = 1;
+
+        // Special food (cyan square)
+        if (special_food_active &&
+            hcount >= special_food_x && hcount < special_food_x + 10 &&
+            vcount >= special_food_y && vcount < special_food_y + 10) begin
+            special_on = 1;
+        end
+
+        // Obstacles
+        for (i = 0; i < 5; i = i + 1) begin
+            if (hcount >= obs_x[i] && hcount < obs_x[i] + 10 &&
+                vcount >= obs_y[i] && vcount < obs_y[i] + 10) begin
+                obs_on = 1;
+            end
+        end
+
+        // Score display
+        if (digit_on(hcount, vcount, digit10, 560, 20)) score_on = 1;
+        if (digit_on(hcount, vcount, digit1, 580, 20)) score_on = 1;
+
+        // Game Over text
+        if (game_over) begin
+            if (char_on(hcount, vcount, "G", 220, 220)) gameover_on = 1;
+            if (char_on(hcount, vcount, "A", 235, 220)) gameover_on = 1;
+            if (char_on(hcount, vcount, "M", 250, 220)) gameover_on = 1;
+            if (char_on(hcount, vcount, "E", 265, 220)) gameover_on = 1;
+            if (char_on(hcount, vcount, "O", 295, 220)) gameover_on = 1;
+            if (char_on(hcount, vcount, "V", 310, 220)) gameover_on = 1;
+            if (char_on(hcount, vcount, "E", 325, 220)) gameover_on = 1;
+            if (char_on(hcount, vcount, "R", 340, 220)) gameover_on = 1;
+        end
+    end
+
+    // Colors
+    assign red   = (video_on && obs_on)      ? 4'b1111 :
+                   (video_on && score_on)   ? 4'b1111 :
+                   (video_on && gameover_on)? 4'b1111 : 4'b0000;
+
+    assign green = (video_on && snake_on==2) ? 4'b1111 : // head
+                   (video_on && snake_on==1) ? 4'b0111 : // body
+                   (video_on && score_on)   ? 4'b1111 :
+                   (video_on && gameover_on)? 4'b1111 :
+                   (video_on && special_on) ? 4'b1111 : 4'b0000;
+
+    assign blue  = (video_on && food_on)     ? 4'b1111 : // normal food
+                   (video_on && special_on) ? 4'b1111 : // special food (cyan)
+                   (video_on && score_on)   ? 4'b1111 :
+                   (video_on && gameover_on)? 4'b1111 : 4'b0000;
+
+
+    // Digit drawing function (7-seg)
+
+    function digit_on;
+        input [9:0] x, y;
+        input [3:0] digit;
+        input [9:0] xpos, ypos;
+        reg [6:0] font[0:9];
+        reg [6:0] row;
+        integer col;
+        begin
+            font[0]=7'b1111110; font[1]=7'b0110000;
+            font[2]=7'b1101101; font[3]=7'b1111001;
+            font[4]=7'b0110011; font[5]=7'b1011011;
+            font[6]=7'b1011111; font[7]=7'b1110000;
+            font[8]=7'b1111111; font[9]=7'b1111011;
+
+            digit_on = 0;
+            if (x >= xpos && x < xpos+8 && y >= ypos && y < ypos+8) begin
+                col = x - xpos;
+                row = font[digit];
+                if (row[col]) digit_on = 1;
+            end
+        end
+    endfunction
+
+
+    // Character drawing (GAME OVER)
+
+    function char_on;
+        input [9:0] x, y;
+        input [7:0] char;
+        input [9:0] xpos, ypos;
+        reg [6:0] fontdata[0:127][0:6];
+        reg [6:0] rowbits;
+        integer row, col;
+        begin
+            // Minimal font for GAME OVER
+            fontdata["G"][0]=7'b0111110; fontdata["G"][1]=7'b1000001;
+            fontdata["G"][2]=7'b1000000; fontdata["G"][3]=7'b1001111;
+            fontdata["G"][4]=7'b1000001; fontdata["G"][5]=7'b1000001;
+            fontdata["G"][6]=7'b0111110;
+
+            fontdata["A"][0]=7'b0111110; fontdata["A"][1]=7'b1000001;
+            fontdata["A"][2]=7'b1000001; fontdata["A"][3]=7'b1111111;
+            fontdata["A"][4]=7'b1000001; fontdata["A"][5]=7'b1000001;
+            fontdata["A"][6]=7'b1000001;
+
+            fontdata["M"][0]=7'b1000001; fontdata["M"][1]=7'b1100011;
+            fontdata["M"][2]=7'b1010101; fontdata["M"][3]=7'b1001001;
+            fontdata["M"][4]=7'b1000001; fontdata["M"][5]=7'b1000001;
+            fontdata["M"][6]=7'b1000001;
+
+            fontdata["E"][0]=7'b1111111; fontdata["E"][1]=7'b1000000;
+            fontdata["E"][2]=7'b1000000; fontdata["E"][3]=7'b1111110;
+            fontdata["E"][4]=7'b1000000; fontdata["E"][5]=7'b1000000;
+            fontdata["E"][6]=7'b1111111;
+
+            fontdata["O"][0]=7'b0111110; fontdata["O"][1]=7'b1000001;
+            fontdata["O"][2]=7'b1000001; fontdata["O"][3]=7'b1000001;
+            fontdata["O"][4]=7'b1000001; fontdata["O"][5]=7'b1000001;
+            fontdata["O"][6]=7'b0111110;
+
+            fontdata["V"][0]=7'b1000001; fontdata["V"][1]=7'b1000001;
+            fontdata["V"][2]=7'b1000001; fontdata["V"][3]=7'b1000001;
+            fontdata["V"][4]=7'b0100010; fontdata["V"][5]=7'b0010100;
+            fontdata["V"][6]=7'b0001000;
+
+            fontdata["R"][0]=7'b1111110; fontdata["R"][1]=7'b1000001;
+            fontdata["R"][2]=7'b1000001; fontdata["R"][3]=7'b1111110;
+            fontdata["R"][4]=7'b1010000; fontdata["R"][5]=7'b1001000;
+            fontdata["R"][6]=7'b1000110;
+
+            char_on = 0;
+            if (x >= xpos && x < xpos+7 && y >= ypos && y < ypos+7) begin
+                row = y - ypos;
+                col = x - xpos;
+                rowbits = fontdata[char][row];
+                if (rowbits[6-col]) char_on = 1;
+            end
+        end
+    endfunction
+endmodule
+
+
+
+
+// Clock Divider
+
+module clk_divider_snake #(parameter DIVISOR = 2)(
+    input clk,
+    output reg clk_out = 0
+);
+    reg [$clog2(DIVISOR)-1:0] counter = 0;
+
+    always @(posedge clk) begin
+        if (counter == DIVISOR - 1) begin
+            counter <= 0;
+            clk_out <= ~clk_out;
+        end else begin
+            counter <= counter + 1;
+        end
+    end
+endmodule
+
+
+
+
+// Clock Divider
+
+module clk_divider_snake #(parameter DIVISOR = 2)(
+    input clk,
+    output reg clk_out = 0
+);
+    reg [$clog2(DIVISOR)-1:0] counter = 0;
+
+    always @(posedge clk) begin
+        if (counter == DIVISOR - 1) begin
+            counter <= 0;
+            clk_out <= ~clk_out;
+        end else begin
+            counter <= counter + 1;
+        end
+    end
+endmodule
+
+
+
+// VGA Sync
+
+module vga_sync_snake(
+    input clk,
+    output reg [9:0] hcount = 0,
+    output reg [9:0] vcount = 0,
+    output reg hsync = 1,
+    output reg vsync = 1,
+    output video_on
+);
+    parameter H_VISIBLE = 640;
+    parameter H_FRONT_PORCH = 16;
+    parameter H_SYNC_PULSE = 96;
+    parameter H_BACK_PORCH = 48;
+    parameter H_TOTAL = H_VISIBLE + H_FRONT_PORCH + H_SYNC_PULSE + H_BACK_PORCH;
+
+    parameter V_VISIBLE = 480;
+    parameter V_FRONT_PORCH = 10;
+    parameter V_SYNC_PULSE = 2;
+    parameter V_BACK_PORCH = 33;
+    parameter V_TOTAL = V_VISIBLE + V_FRONT_PORCH + V_SYNC_PULSE + V_BACK_PORCH;
+
+    always @(posedge clk) begin
+        if (hcount == H_TOTAL - 1) begin
+            hcount <= 0;
+            if (vcount == V_TOTAL - 1) vcount <= 0;
+            else vcount <= vcount + 1;
+        end else begin
+            hcount <= hcount + 1;
+        end
+    end
+
+    always @(*) begin
+        hsync = ~(hcount >= H_VISIBLE + H_FRONT_PORCH &&
+                  hcount < H_VISIBLE + H_FRONT_PORCH + H_SYNC_PULSE);
+        vsync = ~(vcount >= V_VISIBLE + V_FRONT_PORCH &&
+                  vcount < V_VISIBLE + V_FRONT_PORCH + V_SYNC_PULSE);
+    end
+
+    assign video_on = (hcount < H_VISIBLE && vcount < V_VISIBLE);
+endmodule
+
+
+
+// Constraint File
+
+## Clock Signal (100 MHz)
+set_property PACKAGE_PIN W5 [get_ports clk]
+set_property IOSTANDARD LVCMOS33 [get_ports clk]
+create_clock -period 10.00 -name sys_clk_pin -waveform {0 5} [get_ports clk]
+
+## Buttons (direction only, no reset in this design)
+
+set_property PACKAGE_PIN T18 [get_ports btnU]
+set_property IOSTANDARD LVCMOS33 [get_ports btnU]
+
+set_property PACKAGE_PIN U17 [get_ports btnD]
+set_property IOSTANDARD LVCMOS33 [get_ports btnD]
+
+set_property PACKAGE_PIN W19 [get_ports btnL]
+set_property IOSTANDARD LVCMOS33 [get_ports btnL]
+
+set_property PACKAGE_PIN T17 [get_ports btnR]
+set_property IOSTANDARD LVCMOS33 [get_ports btnR]
+
+## VGA Output
+
+# Red channel bits
+set_property PACKAGE_PIN G19 [get_ports {red[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {red[0]}]
+
+set_property PACKAGE_PIN H19 [get_ports {red[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {red[1]}]
+
+set_property PACKAGE_PIN J19 [get_ports {red[2]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {red[2]}]
+
+set_property PACKAGE_PIN N19 [get_ports {red[3]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {red[3]}]
+
+# Blue channel bits
+set_property PACKAGE_PIN N18 [get_ports {blue[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {blue[0]}]
+
+set_property PACKAGE_PIN L18 [get_ports {blue[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {blue[1]}]
+
+set_property PACKAGE_PIN K18 [get_ports {blue[2]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {blue[2]}]
+
+set_property PACKAGE_PIN J18 [get_ports {blue[3]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {blue[3]}]
+
+# Green channel bits
+set_property PACKAGE_PIN J17 [get_ports {green[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {green[0]}]
+
+set_property PACKAGE_PIN H17 [get_ports {green[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {green[1]}]
+
+set_property PACKAGE_PIN G17 [get_ports {green[2]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {green[2]}]
+
+set_property PACKAGE_PIN D17 [get_ports {green[3]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {green[3]}]
+
+# Horizontal and Vertical sync
+set_property PACKAGE_PIN P19 [get_ports hsync]
+set_property IOSTANDARD LVCMOS33 [get_ports hsync]
+
+set_property PACKAGE_PIN R19 [get_ports vsync]
+set_property IOSTANDARD LVCMOS33 [get_ports vsync]
+
+## 7-Segment Display Outputs (shared seg[6:0], two digits with an[1:0])
+
+# seg (common to both digits)
+set_property PACKAGE_PIN W7 [get_ports {seg[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {seg[0]}]
+
+set_property PACKAGE_PIN W6 [get_ports {seg[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {seg[1]}]
+
+set_property PACKAGE_PIN U8 [get_ports {seg[2]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {seg[2]}]
+
+set_property PACKAGE_PIN V8 [get_ports {seg[3]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {seg[3]}]
+
+set_property PACKAGE_PIN U5 [get_ports {seg[4]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {seg[4]}]
+
+set_property PACKAGE_PIN V5 [get_ports {seg[5]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {seg[5]}]
+
+set_property PACKAGE_PIN U7 [get_ports {seg[6]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {seg[6]}]
+
+# Two anodes (digit select)
+set_property PACKAGE_PIN U2 [get_ports {an[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {an[0]}]
+
+set_property PACKAGE_PIN U4 [get_ports {an[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {an[1]}]
